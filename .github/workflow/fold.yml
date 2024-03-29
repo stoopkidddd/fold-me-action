@@ -1,0 +1,59 @@
+name: Fold Me Action
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  fold_me_job:
+    if: "contains(github.event.pull_request.labels.*.name, 'fold me')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Get commit SHA
+        run: echo "::set-env name=COMMIT_SHA::$(jq -r '.pull_request.head.sha' $GITHUB_EVENT_PATH)"
+
+      - name: Find open PRs referencing the commit
+        id: find_prs
+        uses: peter-evans/find-comment@v1
+        with:
+          issue-type: 'pull-request'
+          search-text: 'Commit: ${{ env.COMMIT_SHA }}'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get target branch of open PR
+        id: target_branch
+        run: |
+          PR_URL=$(echo "${{ steps.find_prs.outputs.results }}" | grep -oE 'https://github.com/[^ ]+')
+          TARGET_BRANCH=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" $PR_URL.json | jq -r '.base.ref')
+          echo "::set-env name=TARGET_BRANCH::$TARGET_BRANCH"
+
+      - name: Check if target branch is "develop"
+        id: check_develop
+        run: |
+          if [ "${{ env.TARGET_BRANCH }}" == "develop" ]; then
+            echo "::set-output name=is_develop::true"
+          else
+            echo "::set-output name=is_develop::false"
+          fi
+
+      - name: Merge PR if target branch is not "develop"
+        if: steps.check_develop.outputs.is_develop == 'false'
+        run: |
+          PR_URL=$(echo "${{ steps.find_prs.outputs.results }}" | grep -oE 'https://github.com/[^ ]+')
+          git fetch $PR_URL HEAD:refs/remotes/origin/pr/${{ github.event.pull_request.number }}
+          git checkout ${{ github.event.pull_request.number }}/HEAD
+          git merge --no-ff --no-edit ${{ github.event.pull_request.head.sha }}
+          git push origin HEAD:${{ env.TARGET_BRANCH }}
+
+      - name: Rebase and merge final PR if target branch is "develop"
+        if: steps.check_develop.outputs.is_develop == 'true'
+        run: |
+          PR_URL=$(echo "${{ steps.find_prs.outputs.results }}" | grep -oE 'https://github.com/[^ ]+')
+          git fetch $PR_URL HEAD:refs/remotes/origin/pr/${{ github.event.pull_request.number }}
+          git checkout ${{ github.event.pull_request.number }}/HEAD
+          git rebase origin/develop
+          git push origin HEAD:refs/heads/${{ env.TARGET_BRANCH }}-rebased
+          gh pr merge --squash --delete-branch --auto -m "Rebased and merged PR into develop" ${{ github.event.pull_request.number }}
+
